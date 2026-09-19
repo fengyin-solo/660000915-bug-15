@@ -5,11 +5,20 @@
         <span style="font-size:20px">🏥</span>
         设备健康诊断
       </h3>
-      <span :style="{ padding:'4px 10px', borderRadius:'12px', fontSize:'12px', fontWeight:600,
-        background: getHealthScoreBgColor(store.healthSummary.avgHealthScore),
-        color: getHealthScoreTextColor(store.healthSummary.avgHealthScore) }">
-        综合评分 {{ store.healthSummary.avgHealthScore }}
-      </span>
+      <div style="display:flex;align-items:center;gap:4px">
+        <span :style="{ padding:'4px 10px', borderRadius:'12px', fontSize:'12px', fontWeight:600,
+          background: getHealthScoreBgColor(store.healthSummary.avgHealthScore),
+          color: getHealthScoreTextColor(store.healthSummary.avgHealthScore) }">
+          综合评分 {{ store.healthSummary.avgHealthScore }}
+        </span>
+        <button @click="handleRefresh" title="刷新健康数据"
+          :style="{ padding:'4px 8px', borderRadius:'6px', border:'1px solid #ddd',
+            background:'#fff', cursor:'pointer', fontSize:'12px', color:'#1976d2',
+            display:'flex', alignItems:'center', gap:'4px' }">
+          <span :style="{ display:'inline-block', transition:'transform 0.5s', transform: refreshing ? 'rotate(360deg)' : 'none' }">🔄</span>
+          刷新
+        </button>
+      </div>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;flex-shrink:0">
@@ -38,19 +47,19 @@
     </div>
 
     <div style="display:flex;gap:6px;margin-bottom:12px;flex-shrink:0">
-      <button @click="activeTab = 'overview'"
+      <button @click="store.setHealthActiveTab('overview')"
         :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'overview' ? '#1976d2' : '#ddd'),
           background: activeTab === 'overview' ? '#e3f2fd' : '#fff', color: activeTab === 'overview' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         📊 趋势分析
       </button>
-      <button @click="activeTab = 'priority'"
+      <button @click="store.setHealthActiveTab('priority')"
         :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'priority' ? '#1976d2' : '#ddd'),
           background: activeTab === 'priority' ? '#e3f2fd' : '#fff', color: activeTab === 'priority' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         ⚠️ 优先巡检
       </button>
-      <button @click="activeTab = 'records'"
+      <button @click="store.setHealthActiveTab('records')"
         :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'records' ? '#1976d2' : '#ddd'),
           background: activeTab === 'records' ? '#e3f2fd' : '#fff', color: activeTab === 'records' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
@@ -65,7 +74,7 @@
             <span style="font-size:14px">📱</span>
             <span style="font-weight:600;font-size:13px">{{ selectedDevice.deviceName }}</span>
           </div>
-          <button @click="selectedDevice = null" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px">×</button>
+          <button @click="clearSelectedDevice" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px">×</button>
         </div>
         <div style="display:flex;gap:12px;margin-bottom:10px">
           <div style="flex:1">
@@ -127,7 +136,7 @@
           </h4>
           <span style="font-size:11px;color:#888">最近24小时</span>
         </div>
-        <div v-if="selectedDevice" style="display:flex;flex-direction:column;gap:8px">
+        <div v-if="selectedDevice && currentHistoryData.length > 0" style="display:flex;flex-direction:column;gap:8px">
           <div style="display:flex;align-items:center;gap:8px">
             <div style="flex:1">
               <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px">
@@ -160,6 +169,10 @@
               <div style="font-size:10px;color:#666">异常次数</div>
             </div>
           </div>
+        </div>
+        <div v-else-if="selectedDevice" style="text-align:center;padding:20px;color:#999;font-size:12px">
+          <div style="font-size:24px;margin-bottom:6px">📭</div>
+          该设备暂无在线时长历史数据
         </div>
         <div v-else style="text-align:center;padding:20px;color:#999;font-size:12px">
           请选择设备查看在线时长统计
@@ -282,39 +295,53 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useIotStore } from '../stores/iot';
 import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint } from '../types';
 
 const store = useIotStore();
 
-const activeTab = ref<'overview' | 'priority' | 'records'>('priority');
-const selectedDevice = ref<DeviceHealth | null>(null);
+// Tab 与选中设备均持久化在 store 中：切换面板/重新进入时保持最新结果
+const activeTab = computed(() => store.healthActiveTab);
+// 详情始终通过 deviceId 从最新的 deviceHealthList 派生，数据刷新后自动同步，不残留旧对象
+const selectedDevice = computed<DeviceHealth | null>(() => {
+  const id = store.selectedHealthDeviceId;
+  if (!id) return null;
+  return store.getDeviceHealth(id) || null;
+});
 const batteryChartRef = ref<HTMLElement | null>(null);
 const tempChartRef = ref<HTMLElement | null>(null);
+const refreshing = ref(false);
 
-const currentHistoryData = computed(() => {
-  if (selectedDevice.value) {
-    return selectedDevice.value.historyData;
-  }
-  return store.deviceHealthList[0]?.historyData || [];
+const currentHistoryData = computed<HealthDataPoint[]>(() => {
+  return selectedDevice.value?.historyData || [];
 });
 
+function selectDevice(deviceId: string | null) {
+  store.setSelectedHealthDevice(deviceId);
+}
+
+function clearSelectedDevice() {
+  selectDevice(null);
+}
+
 function handleDeviceClick(health: DeviceHealth) {
-  selectedDevice.value = health;
-  store.setHighlightedDevice(health.deviceId);
-  activeTab.value = 'overview';
-  nextTick(() => {
-    renderCharts();
-  });
+  selectDevice(health.deviceId);
+  store.setHealthActiveTab('overview');
 }
 
 function handleAlertClick(alert: Alert) {
-  const health = store.getDeviceHealth(alert.deviceId);
-  if (health) {
-    selectedDevice.value = health;
-  }
-  store.setHighlightedDevice(alert.deviceId);
+  selectDevice(alert.deviceId);
+  // 从异常记录进入时直接展示该设备的最新趋势详情
+  store.setHealthActiveTab('overview');
+}
+
+function handleRefresh() {
+  refreshing.value = true;
+  store.refreshHealthData();
+  window.setTimeout(() => {
+    refreshing.value = false;
+  }, 500);
 }
 
 function handleHover(deviceId: string | null) {
@@ -480,10 +507,13 @@ function renderLineChart(
   color: string,
   yMin: number,
   yMax: number,
-  unit: string
+  unit: string,
+  emptyText: string
 ) {
   if (!data || data.length === 0) {
-    container.innerHTML = '<div style="text-align:center;padding:30px;color:#999;font-size:12px">暂无数据</div>';
+    container.innerHTML =
+      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:120px;color:#999;font-size:12px">' +
+      '<div style="font-size:24px;margin-bottom:6px">📭</div>' + emptyText + '</div>';
     return;
   }
 
@@ -555,19 +585,25 @@ function renderLineChart(
 }
 
 function renderCharts() {
+  // 每次渲染前先清空，防止切换设备/刷新后残留上一张旧图
+  if (batteryChartRef.value) batteryChartRef.value.innerHTML = '';
+  if (tempChartRef.value) tempChartRef.value.innerHTML = '';
+
+  const emptyText = selectedDevice.value ? '该设备暂无历史数据' : '请先在上方选择设备';
   if (batteryChartRef.value) {
-    renderLineChart(batteryChartRef.value, currentHistoryData.value, 'battery', '#4caf50', 0, 100, '%');
+    renderLineChart(batteryChartRef.value, currentHistoryData.value, 'battery', '#4caf50', 0, 100, '%', emptyText);
   }
   if (tempChartRef.value) {
-    renderLineChart(tempChartRef.value, currentHistoryData.value, 'temperature', '#ff9800', 15, 50, '°C');
+    renderLineChart(tempChartRef.value, currentHistoryData.value, 'temperature', '#ff9800', 15, 50, '°C', emptyText);
   }
 }
 
-watch(selectedDevice, () => {
+// 历史数据变化（数据刷新/切换设备/记录变化）后重绘，保证图表始终与最新详情一致
+watch(currentHistoryData, () => {
   nextTick(() => {
     renderCharts();
   });
-});
+}, { deep: false });
 
 watch(activeTab, (newTab) => {
   if (newTab === 'overview') {
@@ -577,17 +613,24 @@ watch(activeTab, (newTab) => {
   }
 });
 
+function handleResize() {
+  if (activeTab.value === 'overview') {
+    renderCharts();
+  }
+}
+
 onMounted(() => {
-  if (store.deviceHealthList.length > 0 && !selectedDevice.value) {
-    selectedDevice.value = store.deviceHealthList[0];
+  // 首次进入无已选设备时，默认选中排名第一的设备；再次进入则保留之前选择（持久在 store）
+  if (!store.selectedHealthDeviceId && store.deviceHealthList.length > 0) {
+    selectDevice(store.deviceHealthList[0].deviceId);
   }
   nextTick(() => {
     renderCharts();
   });
-
-  const handleResize = () => {
-    renderCharts();
-  };
   window.addEventListener('resize', handleResize);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize);
 });
 </script>
