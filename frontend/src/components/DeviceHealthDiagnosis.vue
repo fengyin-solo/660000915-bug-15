@@ -65,7 +65,7 @@
             <span style="font-size:14px">📱</span>
             <span style="font-weight:600;font-size:13px">{{ selectedDevice.deviceName }}</span>
           </div>
-          <button @click="selectedDevice = null" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px">×</button>
+          <button @click="handleClearSelection" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px">×</button>
         </div>
         <div style="display:flex;gap:12px;margin-bottom:10px">
           <div style="flex:1">
@@ -282,39 +282,42 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useIotStore } from '../stores/iot';
 import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint } from '../types';
 
 const store = useIotStore();
 
-const activeTab = ref<'overview' | 'priority' | 'records'>('priority');
-const selectedDevice = ref<DeviceHealth | null>(null);
+// 选中设备与当前页签持久化在 store：面板切换卸载重建后仍恢复，
+// 数据刷新时通过 deviceId 重新从最新列表取值，详情不再持有过期快照
+const activeTab = computed({
+  get: () => store.healthActiveTab,
+  set: (tab) => store.setHealthActiveTab(tab)
+});
+const selectedDevice = computed<DeviceHealth | null>(() =>
+  store.selectedHealthDeviceId ? (store.getDeviceHealth(store.selectedHealthDeviceId) ?? null) : null
+);
 const batteryChartRef = ref<HTMLElement | null>(null);
 const tempChartRef = ref<HTMLElement | null>(null);
 
-const currentHistoryData = computed(() => {
-  if (selectedDevice.value) {
-    return selectedDevice.value.historyData;
-  }
-  return store.deviceHealthList[0]?.historyData || [];
+const currentHistoryData = computed<HealthDataPoint[]>(() => {
+  return selectedDevice.value?.historyData || [];
 });
 
 function handleDeviceClick(health: DeviceHealth) {
-  selectedDevice.value = health;
-  store.setHighlightedDevice(health.deviceId);
-  activeTab.value = 'overview';
-  nextTick(() => {
-    renderCharts();
-  });
+  store.setSelectedHealthDevice(health.deviceId);
+  store.setHealthActiveTab('overview');
 }
 
 function handleAlertClick(alert: Alert) {
-  const health = store.getDeviceHealth(alert.deviceId);
-  if (health) {
-    selectedDevice.value = health;
+  if (store.getDeviceHealth(alert.deviceId)) {
+    store.setSelectedHealthDevice(alert.deviceId);
   }
-  store.setHighlightedDevice(alert.deviceId);
+  store.setHealthActiveTab('overview');
+}
+
+function handleClearSelection() {
+  store.setSelectedHealthDevice(null);
 }
 
 function handleHover(deviceId: string | null) {
@@ -563,31 +566,44 @@ function renderCharts() {
   }
 }
 
-watch(selectedDevice, () => {
-  nextTick(() => {
-    renderCharts();
-  });
-});
-
-watch(activeTab, (newTab) => {
-  if (newTab === 'overview') {
+// 选中设备变化或其历史数据刷新时，重绘图表，避免残留旧图
+watch([selectedDevice, currentHistoryData], () => {
+  if (activeTab.value === 'overview') {
     nextTick(() => {
       renderCharts();
     });
   }
 });
 
+// 切到趋势页时容器才挂载，需要渲染当前最新记录；切走时清空图表容器
+watch(activeTab, (newTab) => {
+  if (newTab === 'overview') {
+    nextTick(() => {
+      renderCharts();
+    });
+  } else {
+    if (batteryChartRef.value) batteryChartRef.value.innerHTML = '';
+    if (tempChartRef.value) tempChartRef.value.innerHTML = '';
+  }
+});
+
+function handleResize() {
+  renderCharts();
+}
+
 onMounted(() => {
-  if (store.deviceHealthList.length > 0 && !selectedDevice.value) {
-    selectedDevice.value = store.deviceHealthList[0];
+  // 未选中或之前选中的设备已不存在时，回退到当前排序第一台；
+  // 排序变化不会丢失已选设备
+  if (!selectedDevice.value && store.deviceHealthList.length > 0) {
+    store.setSelectedHealthDevice(store.deviceHealthList[0].deviceId);
   }
   nextTick(() => {
     renderCharts();
   });
-
-  const handleResize = () => {
-    renderCharts();
-  };
   window.addEventListener('resize', handleResize);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize);
 });
 </script>

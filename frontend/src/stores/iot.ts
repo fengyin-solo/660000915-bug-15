@@ -58,6 +58,10 @@ export const useIotStore = defineStore('iot', () => {
   const selectedFenceId = ref<string | null>(null);
   const editMode = ref<'none' | 'draw-circle' | 'draw-polygon' | 'edit'>('none');
   const highlightedDeviceId = ref<string | null>(null);
+  // 健康诊断的选中设备与当前页签持久化在 store 中，
+  // 面板卸载重建（切换菜单）后仍能恢复到最新的选中详情
+  const selectedHealthDeviceId = ref<string | null>(null);
+  const healthActiveTab = ref<'overview' | 'priority' | 'records'>('priority');
   const isRegisteringDevice = ref(false);
   const registrationLocation = ref<{ lat: number; lng: number } | null>(null);
 
@@ -631,7 +635,16 @@ export const useIotStore = defineStore('iot', () => {
     return meters + ' 米';
   }
 
+  // 历史曲线按设备缓存：deviceHealthList 重算（告警/设备状态变化）时
+  // 不重新随机生成，保证图表持久稳定；设备被删除时同步清理缓存
+  const healthHistoryCache = new Map<string, HealthDataPoint[]>();
+
   function generateHealthHistory(device: Device, hours: number = 24): HealthDataPoint[] {
+    const cached = healthHistoryCache.get(device.id);
+    if (cached && cached.length > 0) {
+      return cached;
+    }
+
     const points: HealthDataPoint[] = [];
     const now = new Date();
     const interval = 30 * 60 * 1000;
@@ -655,7 +668,18 @@ export const useIotStore = defineStore('iot', () => {
       });
     }
 
+    if (points.length > 0) {
+      healthHistoryCache.set(device.id, points);
+    }
     return points;
+  }
+
+  function pruneHealthHistoryCache() {
+    for (const id of [...healthHistoryCache.keys()]) {
+      if (!devices.value.some(d => d.id === id)) {
+        healthHistoryCache.delete(id);
+      }
+    }
   }
 
   function calculateHealthScore(device: Device): number {
@@ -761,6 +785,9 @@ export const useIotStore = defineStore('iot', () => {
   function calculateOnlineHours(history: HealthDataPoint[]): { online: number; offline: number } {
     const onlinePoints = history.filter(p => p.isOnline).length;
     const totalPoints = history.length;
+    if (totalPoints === 0) {
+      return { online: 0, offline: 0 };
+    }
     const totalHours = totalPoints * 0.5;
     return {
       online: Math.round((onlinePoints / totalPoints) * totalHours * 10) / 10,
@@ -769,6 +796,7 @@ export const useIotStore = defineStore('iot', () => {
   }
 
   const deviceHealthList = computed<DeviceHealth[]>(() => {
+    pruneHealthHistoryCache();
     const healthData = devices.value.map((device) => {
       const historyData = generateHealthHistory(device);
       const healthScore = calculateHealthScore(device);
@@ -829,7 +857,12 @@ export const useIotStore = defineStore('iot', () => {
 
     const avgHealthScore = Math.round(list.reduce((sum, h) => sum + h.healthScore, 0) / list.length);
     const totalAlertCount = list.reduce((sum, h) => sum + h.alertCount, 0);
-    const avgOnlineRate = Math.round((list.reduce((sum, h) => sum + (h.onlineHours / (h.onlineHours + h.offlineHours)), 0) / list.length) * 100);
+    const avgOnlineRate = Math.round(
+      (list.reduce((sum, h) => {
+        const total = h.onlineHours + h.offlineHours;
+        return sum + (total > 0 ? h.onlineHours / total : 0);
+      }, 0) / list.length) * 100
+    );
     const avgBatteryLevel = Math.round(list.reduce((sum, h) => sum + h.batteryLevel, 0) / list.length);
 
     const highPriorityCount = list.filter(h => h.healthScore < 40).length;
@@ -857,9 +890,21 @@ export const useIotStore = defineStore('iot', () => {
     return deviceHealthList.value.find(h => h.deviceId === deviceId);
   }
 
+  function setSelectedHealthDevice(deviceId: string | null) {
+    selectedHealthDeviceId.value = deviceId;
+    if (deviceId) {
+      highlightedDeviceId.value = deviceId;
+    }
+  }
+
+  function setHealthActiveTab(tab: 'overview' | 'priority' | 'records') {
+    healthActiveTab.value = tab;
+  }
+
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
+    selectedHealthDeviceId, healthActiveTab,
     onlineCount, offlineCount, alertDeviceCount, deviceCount, fenceCount, alertCount, selectedFence,
     avgBattery, avgTemperature, lowBatteryCount, devicesRanked, recentAlerts,
     unacknowledgedAlerts, criticalAlerts, warningAlerts, infoAlerts,
@@ -870,6 +915,7 @@ export const useIotStore = defineStore('iot', () => {
     playbackCurrentPoint, playbackProgress, playbackCurrentTime,
     deviceHealthList, priorityInspectionList, healthSummary, recentAbnormalRecords,
     getDeviceById, getFenceById, getGroupById, getDeviceHealth,
+    setSelectedHealthDevice, setHealthActiveTab,
     acknowledgeAlert, batchAcknowledgeAlerts, acknowledgeAllAlerts,
     setHighlightedDevice, addAlert, generateMockAlert,
     startMockAlertStream, stopMockAlertStream,
